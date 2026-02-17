@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 from pathlib import Path
 
 import zvec
@@ -16,7 +15,7 @@ from rag.embedder import embed_texts, get_dimension
 
 logger = logging.getLogger(__name__)
 
-COLLECTION_NAME = "telegram_messages"
+VECTOR_FIELD = "embedding"
 PROCESSED_IDS_FILE = "processed_ids.json"
 BATCH_SIZE = 32
 
@@ -33,6 +32,20 @@ def _save_processed_ids(db_path: str, ids: set[int]) -> None:
     """Persist set of processed message IDs."""
     filepath = Path(db_path) / PROCESSED_IDS_FILE
     filepath.write_text(json.dumps(sorted(ids)))
+
+
+def _build_schema(dim: int) -> zvec.CollectionSchema:
+    """Build the zvec collection schema."""
+    return zvec.CollectionSchema(
+        name="telegram_messages",
+        fields=zvec.FieldSchema("metadata", zvec.DataType.STRING, nullable=False),
+        vectors=zvec.VectorSchema(
+            VECTOR_FIELD,
+            zvec.DataType.VECTOR_FP32,
+            dimension=dim,
+            index_param=zvec.HnswIndexParam(),
+        ),
+    )
 
 
 def run_ingestion(export_path: str | None = None, db_path: str | None = None) -> None:
@@ -60,19 +73,22 @@ def run_ingestion(export_path: str | None = None, db_path: str | None = None) ->
     chunks = chunk_messages(new_messages)
     logger.info("Created %d chunks.", len(chunks))
 
-    # Step 4: Initialize zvec
-    db = zvec.Database(db_path)
+    # Step 4: Initialize zvec collection
     dim = get_dimension()
 
+    # Try to open existing collection, or create new one
     try:
-        collection = db.get_collection(COLLECTION_NAME)
-        logger.info("Using existing collection '%s'.", COLLECTION_NAME)
+        collection = zvec.open(path=db_path)
+        logger.info("Opened existing collection at '%s'.", db_path)
     except Exception:
-        logger.info("Creating new collection '%s' (dim=%d).", COLLECTION_NAME, dim)
-        collection = db.create_collection(COLLECTION_NAME, dimension=dim)
+        logger.info("Creating new collection (dim=%d) at '%s'.", dim, db_path)
+        schema = _build_schema(dim)
+        collection = zvec.create_and_open(path=db_path, schema=schema)
 
     # Step 5: Embed and insert in batches
     total = len(chunks)
+    doc_counter = collection.stats.doc_count if hasattr(collection.stats, 'doc_count') else 0
+
     for batch_start in range(0, total, BATCH_SIZE):
         batch = chunks[batch_start : batch_start + BATCH_SIZE]
         texts = [c.text for c in batch]
@@ -85,7 +101,9 @@ def run_ingestion(export_path: str | None = None, db_path: str | None = None) ->
         )
         embeddings = embed_texts(texts)
 
-        for chunk, embedding in zip(batch, embeddings):
+        docs = []
+        for i, (chunk, embedding) in enumerate(zip(batch, embeddings)):
+            doc_id = f"chunk_{doc_counter + batch_start + i}"
             metadata = json.dumps(
                 {
                     "text": chunk.text,
@@ -97,7 +115,20 @@ def run_ingestion(export_path: str | None = None, db_path: str | None = None) ->
                 },
                 ensure_ascii=False,
             )
-            collection.insert(embedding, metadata=metadata)
+            docs.append(
+                zvec.Doc(
+                    id=doc_id,
+                    vectors={VECTOR_FIELD: embedding},
+                    fields={"metadata": metadata},
+                )
+            )
+
+        statuses = collection.insert(docs)
+        failed = sum(1 for s in statuses if not s.ok())
+        if failed:
+            logger.warning("%d documents failed to insert in this batch.", failed)
+
+    collection.flush()
 
     # Step 6: Track processed IDs
     new_ids = {m.id for m in new_messages}

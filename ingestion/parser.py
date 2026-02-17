@@ -19,7 +19,7 @@ class TelegramMessage:
     timestamp: datetime
     text: str
     reply_to_id: int | None = None
-    media_type: str | None = None  # "photo", "video", "voice", "sticker", "file"
+    media_type: str | None = None  # "photo", "video", "voice", "audio", "sticker", "file", "poll"
     media_path: str | None = None
     is_forwarded: bool = False
     forwarded_from: str | None = None
@@ -96,13 +96,13 @@ def _parse_media(div: Tag) -> tuple[str | None, str | None]:
     if media_wrap is None:
         return None, None
 
-    # Photo
-    photo = media_wrap.select_one("a.photo_wrap")
+    # Photo — two formats: a.photo_wrap (inline) and a.media_photo (block link)
+    photo = media_wrap.select_one("a.photo_wrap") or media_wrap.select_one("a.media_photo")
     if photo:
         return "photo", photo.get("href")
 
-    # Video
-    video = media_wrap.select_one("a.video_file_wrap")
+    # Video — two formats: a.video_file_wrap (with thumbnail) and a.media_video (block link)
+    video = media_wrap.select_one("a.video_file_wrap") or media_wrap.select_one("a.media_video")
     if video:
         return "video", video.get("href")
 
@@ -110,6 +110,18 @@ def _parse_media(div: Tag) -> tuple[str | None, str | None]:
     voice = media_wrap.select_one("a.media_voice_message")
     if voice:
         return "voice", voice.get("href")
+
+    # Audio file (not voice — e.g. forwarded audio)
+    audio = media_wrap.select_one("a.media_audio_file")
+    if audio:
+        return "audio", audio.get("href")
+
+    # Poll
+    poll = media_wrap.select_one(".media_poll")
+    if poll:
+        question = poll.select_one(".question")
+        poll_text = question.get_text(strip=True) if question else ""
+        return "poll", poll_text  # store poll question in media_path
 
     # Sticker
     sticker = media_wrap.select_one(".sticker_wrap")

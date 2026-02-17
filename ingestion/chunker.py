@@ -35,15 +35,20 @@ def _format_message(msg: TelegramMessage) -> str:
     parts = [f"{prefix}:"]
     if msg.text:
         parts.append(msg.text)
-    if msg.media_type and not msg.text:
+    if msg.media_type:
         media_labels = {
             "photo": "[Foto]",
             "video": "[Vídeo]",
             "voice": "[Áudio]",
+            "audio": "[Arquivo de áudio]",
             "sticker": "[Sticker]",
             "file": "[Arquivo]",
+            "poll": None,  # handled below
         }
-        parts.append(media_labels.get(msg.media_type, "[Mídia]"))
+        if msg.media_type == "poll" and msg.media_path:
+            parts.append(f"[Enquete: {msg.media_path}]")
+        elif not msg.text:
+            parts.append(media_labels.get(msg.media_type, "[Mídia]"))
     return " ".join(parts)
 
 

@@ -9,53 +9,61 @@ from pathlib import Path
 
 import zvec
 
-from rag.embedder import embed_query
+from rag.embedder import embed_query, get_dimension
 from rag.llm import generate_response
 from bot.identity import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-COLLECTION_NAME = "telegram_messages"
+VECTOR_FIELD = "embedding"
 TOP_K = 10
 
-_db: zvec.Database | None = None
+_collection = None
 
 
-def _get_db() -> zvec.Database:
-    """Get or initialize the zvec database."""
-    global _db
-    if _db is None:
+def _get_collection():
+    """Get or open the zvec collection."""
+    global _collection
+    if _collection is None:
         db_path = os.getenv("ZVEC_DB_PATH", "./data/zvec_db")
-        Path(db_path).mkdir(parents=True, exist_ok=True)
-        _db = zvec.Database(db_path)
-    return _db
+        try:
+            _collection = zvec.open(path=db_path)
+            logger.info("Opened zvec collection at %s", db_path)
+        except Exception:
+            logger.warning("Could not open zvec collection at %s. Run ingestion first.", db_path)
+            return None
+    return _collection
 
 
-def search(query: str, top_k: int = TOP_K) -> list[dict]:
+def search(query_text: str, top_k: int = TOP_K) -> list[dict]:
     """Search the vector DB for relevant chunks.
 
     Returns a list of dicts with 'text', 'authors', 'start_time', 'end_time', 'score'.
     """
-    db = _get_db()
-
-    try:
-        collection = db.get_collection(COLLECTION_NAME)
-    except Exception:
-        logger.warning("Collection '%s' not found. Run ingestion first.", COLLECTION_NAME)
+    collection = _get_collection()
+    if collection is None:
         return []
 
-    query_embedding = embed_query(query)
-    results = collection.search(query_embedding, top_k=top_k)
+    query_embedding = embed_query(query_text)
+
+    results = collection.query(
+        vectors=zvec.VectorQuery(VECTOR_FIELD, vector=query_embedding),
+        topk=top_k,
+    )
 
     documents = []
-    for result in results:
-        metadata = json.loads(result.metadata) if isinstance(result.metadata, str) else result.metadata
+    for doc in results:
+        # Metadata stored as JSON in the 'metadata' field
+        raw = doc.field("metadata")
+        if raw is None:
+            continue
+        metadata = json.loads(raw) if isinstance(raw, str) else raw
         documents.append({
             "text": metadata.get("text", ""),
             "authors": metadata.get("authors", []),
             "start_time": metadata.get("start_time", ""),
             "end_time": metadata.get("end_time", ""),
-            "score": result.score,
+            "score": doc.score,
         })
 
     return documents

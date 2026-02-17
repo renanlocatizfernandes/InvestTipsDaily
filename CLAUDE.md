@@ -33,7 +33,7 @@ docker/       — Dockerfile
 
 ### Data Structure
 
-- `messages.html` through `messages10.html` — Telegram chat history split across 10 HTML files (standard Telegram export format). Messages span from **August 2024 to October 2024+** and include topics like "CoinTech2U" and "Papo sobre criptomoedas".
+- `messages.html` through `messages20.html` — Telegram chat history split across 20 HTML files (standard Telegram export format). Messages span from **August 2024 to October 2024+** and include topics like "CoinTech2U" and "Papo sobre criptomoedas".
 - `photos/` — Exported images (JPG with thumbnails)
 - `files/` — Exported file attachments (PNG images)
 - `video_files/` — Exported videos (MP4)
