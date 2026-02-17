@@ -27,8 +27,8 @@ images/
 css/
 js/
 
-# zvec database
-data/zvec_db/
+# Data (vector DB + telegram exports)
+data/
 
 # IDE
 .vscode/

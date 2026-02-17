@@ -1,4 +1,4 @@
-"""Ingestion script: parse HTML exports → chunk → embed → store in zvec."""
+"""Ingestion script: parse HTML exports → chunk → embed → store in ChromaDB."""
 
 from __future__ import annotations
 
@@ -7,15 +7,15 @@ import logging
 import os
 from pathlib import Path
 
-import zvec
+import chromadb
 
 from ingestion.parser import parse_all_exports
 from ingestion.chunker import chunk_messages
-from rag.embedder import embed_texts, get_dimension
+from rag.embedder import embed_texts
 
 logger = logging.getLogger(__name__)
 
-VECTOR_FIELD = "embedding"
+COLLECTION_NAME = "telegram_messages"
 PROCESSED_IDS_FILE = "processed_ids.json"
 BATCH_SIZE = 32
 
@@ -34,24 +34,10 @@ def _save_processed_ids(db_path: str, ids: set[int]) -> None:
     filepath.write_text(json.dumps(sorted(ids)))
 
 
-def _build_schema(dim: int) -> zvec.CollectionSchema:
-    """Build the zvec collection schema."""
-    return zvec.CollectionSchema(
-        name="telegram_messages",
-        fields=zvec.FieldSchema("metadata", zvec.DataType.STRING, nullable=False),
-        vectors=zvec.VectorSchema(
-            VECTOR_FIELD,
-            zvec.DataType.VECTOR_FP32,
-            dimension=dim,
-            index_param=zvec.HnswIndexParam(),
-        ),
-    )
-
-
 def run_ingestion(export_path: str | None = None, db_path: str | None = None) -> None:
     """Run the full ingestion pipeline."""
     export_path = export_path or os.getenv("TELEGRAM_EXPORT_PATH", "./data/telegram_export")
-    db_path = db_path or os.getenv("ZVEC_DB_PATH", "./data/zvec_db")
+    db_path = db_path or os.getenv("CHROMA_DB_PATH", "./data/chroma_db")
 
     Path(db_path).mkdir(parents=True, exist_ok=True)
 
@@ -73,21 +59,16 @@ def run_ingestion(export_path: str | None = None, db_path: str | None = None) ->
     chunks = chunk_messages(new_messages)
     logger.info("Created %d chunks.", len(chunks))
 
-    # Step 4: Initialize zvec collection
-    dim = get_dimension()
-
-    # Try to open existing collection, or create new one
-    try:
-        collection = zvec.open(path=db_path)
-        logger.info("Opened existing collection at '%s'.", db_path)
-    except Exception:
-        logger.info("Creating new collection (dim=%d) at '%s'.", dim, db_path)
-        schema = _build_schema(dim)
-        collection = zvec.create_and_open(path=db_path, schema=schema)
+    # Step 4: Initialize ChromaDB
+    client = chromadb.PersistentClient(path=db_path)
+    collection = client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"},
+    )
 
     # Step 5: Embed and insert in batches
     total = len(chunks)
-    doc_counter = collection.stats.doc_count if hasattr(collection.stats, 'doc_count') else 0
+    existing_count = collection.count()
 
     for batch_start in range(0, total, BATCH_SIZE):
         batch = chunks[batch_start : batch_start + BATCH_SIZE]
@@ -101,41 +82,38 @@ def run_ingestion(export_path: str | None = None, db_path: str | None = None) ->
         )
         embeddings = embed_texts(texts)
 
-        docs = []
-        for i, (chunk, embedding) in enumerate(zip(batch, embeddings)):
-            doc_id = f"chunk_{doc_counter + batch_start + i}"
-            metadata = json.dumps(
-                {
-                    "text": chunk.text,
-                    "authors": chunk.authors,
-                    "start_time": chunk.start_time,
-                    "end_time": chunk.end_time,
-                    "message_ids": chunk.message_ids,
-                    "message_count": chunk.metadata["message_count"],
-                },
-                ensure_ascii=False,
-            )
-            docs.append(
-                zvec.Doc(
-                    id=doc_id,
-                    vectors={VECTOR_FIELD: embedding},
-                    fields={"metadata": metadata},
-                )
-            )
+        ids = []
+        metadatas = []
+        documents = []
+        for i, chunk in enumerate(batch):
+            doc_id = f"chunk_{existing_count + batch_start + i}"
+            ids.append(doc_id)
+            documents.append(chunk.text)
+            metadatas.append({
+                "authors": json.dumps(chunk.authors, ensure_ascii=False),
+                "start_time": chunk.start_time,
+                "end_time": chunk.end_time,
+                "message_ids": json.dumps(chunk.message_ids),
+                "message_count": chunk.metadata["message_count"],
+            })
 
-        statuses = collection.insert(docs)
-        failed = sum(1 for s in statuses if not s.ok())
-        if failed:
-            logger.warning("%d documents failed to insert in this batch.", failed)
-
-    collection.flush()
+        collection.add(
+            ids=ids,
+            embeddings=embeddings,
+            documents=documents,
+            metadatas=metadatas,
+        )
 
     # Step 6: Track processed IDs
     new_ids = {m.id for m in new_messages}
     processed_ids.update(new_ids)
     _save_processed_ids(db_path, processed_ids)
 
-    logger.info("Ingestion complete. %d chunks inserted.", len(chunks))
+    logger.info(
+        "Ingestion complete. %d chunks inserted. Total in DB: %d.",
+        len(chunks),
+        collection.count(),
+    )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,6 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data/zvec_db:/app/data/zvec_db
+      - ./data/chroma_db:/app/data/chroma_db
       - ./data/telegram_export:/app/data/telegram_export
     restart: unless-stopped

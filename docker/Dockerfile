@@ -17,6 +17,6 @@ COPY rag/ rag/
 COPY ingestion/ ingestion/
 
 # Create data directories
-RUN mkdir -p /app/data/zvec_db /app/data/telegram_export
+RUN mkdir -p /app/data/chroma_db /app/data/telegram_export
 
 CMD ["python", "-m", "bot.main"]

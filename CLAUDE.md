@@ -58,21 +58,21 @@ Each message in the HTML files follows this structure:
 | Component | Technology |
 |-----------|-----------|
 | Bot | python-telegram-bot |
-| Vector DB | zvec (alibaba/zvec) — in-process |
+| Vector DB | ChromaDB — in-process, persistent |
 | Embeddings | sentence-transformers (multilingual-e5-large) |
 | LLM | Anthropic Claude Haiku 4.5 |
 | Parser | BeautifulSoup4 + lxml |
 | Container | Docker + docker-compose |
 
-### zvec (Vector Database)
-- In-process vector database from Alibaba (`pip install zvec`). No server needed.
-- Requires Python 3.10-3.12, Linux x86_64 or macOS ARM64 (must run in Docker on Windows).
+### ChromaDB (Vector Database)
+- In-process vector database (`pip install chromadb`). No server needed.
+- Persistent storage to disk. Works on any platform (Linux, macOS, Windows).
 
 ### Environment Variables (see .env.example)
 - `ANTHROPIC_API_KEY` — Claude API key
 - `TELEGRAM_BOT_TOKEN` — Bot token from @BotFather
 - `EMBEDDING_MODEL` — Embedding model name (default: intfloat/multilingual-e5-large)
-- `ZVEC_DB_PATH` — Path to zvec database directory
+- `CHROMA_DB_PATH` — Path to ChromaDB database directory
 - `TELEGRAM_EXPORT_PATH` — Path to Telegram HTML exports
 - `CLAUDE_MODEL` — Claude model ID
 
