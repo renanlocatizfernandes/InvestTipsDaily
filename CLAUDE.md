@@ -4,82 +4,93 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the **InvestTipsDaily** project — a Telegram group chat intelligence system for the group "Invest Tips Daily - BR". The project has two phases:
+**InvestTipsDaily** is a Telegram bot ("TipsAI") for the "Invest Tips Daily - BR" group. It ingests exported Telegram chat history (HTML files), builds a vector knowledge base, and answers questions via a RAG pipeline powered by Claude Haiku. All content is in **Brazilian Portuguese (pt-BR)**.
 
-1. **Data ingestion & RAG**: Parse exported Telegram chat history, build a knowledge base using vector embeddings (zvec + Anthropic API), and serve it via a RAG pipeline.
-2. **Telegram bot**: Connect the RAG intelligence to an existing Telegram bot in the group (bot access to be provided later).
+## Commands
 
-The entire stack should be containerized with Docker for portability across servers.
+```bash
+# Run all tests
+pytest tests/ -v
 
-## Current State of the Repository
+# Run a single test file / single test
+pytest tests/test_parser.py -v
+pytest tests/test_chunker.py::test_temporal_grouping -v
 
-The repository contains the **TipsAI bot** application code and raw Telegram chat export data.
+# Run ingestion (parse HTML → chunk → embed → store in ChromaDB)
+python -m ingestion.ingest                              # local
+docker compose run --rm bot python -m ingestion.ingest  # docker
 
-### Application Structure
+# Run bot
+python -m bot.main         # local
+docker compose up           # docker
 
+# Install dev dependencies
+pip install -e ".[dev]"
 ```
-bot/          — Telegram bot (main.py, handlers.py, identity.py)
-rag/          — RAG pipeline (pipeline.py, embedder.py, llm.py)
-ingestion/    — Data ingestion (parser.py, chunker.py, ingest.py)
-tests/        — Test suite (test_parser.py, test_chunker.py, test_bot.py)
-docker/       — Dockerfile
-```
-
-### Key Commands
-- **Run tests**: `pytest tests/ -v`
-- **Run ingestion**: `python -m ingestion.ingest`
-- **Run bot**: `python -m bot.main`
-- **Docker**: `docker-compose up`
-
-### Data Structure
-
-- `messages.html` through `messages20.html` — Telegram chat history split across 20 HTML files (standard Telegram export format). Messages span from **August 2024 to October 2024+** and include topics like "CoinTech2U" and "Papo sobre criptomoedas".
-- `photos/` — Exported images (JPG with thumbnails)
-- `files/` — Exported file attachments (PNG images)
-- `video_files/` — Exported videos (MP4)
-- `voice_messages/` — Voice messages (OGG)
-- `stickers/` — Animated stickers (TGS)
-- `css/style.css`, `js/script.js`, `images/` — Telegram export viewer assets (auto-generated, do not modify)
-
-### Message HTML Format
-
-Each message in the HTML files follows this structure:
-- `div.message.default` with `id="message{N}"` — contains the message
-- `div.from_name` — sender name
-- `div.pull_right.date.details` with `title` attribute — timestamp in format `DD.MM.YYYY HH:MM:SS UTC-03:00`
-- `div.text` — message text content
-- `div.reply_to` — reply references using `GoToMessage(id)` links
-- `div.media_wrap` — attached media (photos, videos, files)
-- `div.message.service` — system messages (group creation, member joins, topic creation)
 
 ## Architecture
 
+### Data Flow
+
+```
+Telegram HTML exports (messages*.html)
+    ↓  ingestion/parser.py     — BeautifulSoup4 extracts TelegramMessage dataclasses
+    ↓  ingestion/chunker.py    — Groups messages by conversation (30min gap / reply chains), splits at ~2000 chars
+    ↓  rag/embedder.py         — sentence-transformers encodes chunks (multilingual-e5-large, 1024-dim)
+    ↓  ingestion/ingest.py     — Stores embeddings + metadata in ChromaDB (PersistentClient)
+
+User question (Telegram)
+    ↓  bot/handlers.py         — Routes commands (/tips, /buscar, /resumo) and @mentions
+    ↓  rag/pipeline.py         — Embeds query → ChromaDB cosine search (top 8, threshold 0.3)
+    ↓  rag/web_search.py       — If question matches realtime keywords (prices, "hoje", crypto tickers), searches web via DuckDuckGo
+    ↓  rag/llm.py              — Sends context + question to Claude Haiku, returns response
+    ↓  bot/handlers.py         — Sends response back to Telegram (auto-splits messages >4096 chars)
+```
+
+### Key Design Patterns
+
+- **E5 prefix convention**: `embed_texts()` prefixes documents with `"passage: "`, `embed_query()` prefixes with `"query: "`. This is required by the multilingual-e5 model — mixing them up breaks retrieval quality.
+- **Lazy singletons**: Embedding model, ChromaDB collection, and Anthropic client are all lazy-loaded on first use via module-level `_get_*()` functions. Bot startup calls `_preload_models()` to warm them up.
+- **Incremental ingestion**: `processed_ids.json` in the ChromaDB directory tracks which message IDs have been ingested. Re-running ingestion only processes new messages.
+- **Joined messages**: Telegram export uses `div.message.default.joined` for consecutive messages by the same author (no author div). Parser inherits author from the previous message via `current_author` state.
+- **Async bot, sync RAG**: Bot handlers are async (python-telegram-bot). RAG pipeline is synchronous — handlers use `asyncio.to_thread()` to avoid blocking. Typing indicator stays active via a background task.
+
 ### Stack
+
 | Component | Technology |
 |-----------|-----------|
-| Bot | python-telegram-bot |
-| Vector DB | ChromaDB — in-process, persistent |
-| Embeddings | sentence-transformers (multilingual-e5-large) |
-| LLM | Anthropic Claude Haiku 4.5 |
-| Parser | BeautifulSoup4 + lxml |
+| Bot framework | python-telegram-bot (async, polling) |
+| Vector DB | ChromaDB (in-process PersistentClient, cosine distance) |
+| Embeddings | sentence-transformers/multilingual-e5-large (1024-dim) |
+| LLM | Anthropic Claude Haiku 4.5 (claude-haiku-4-5-20251001) |
+| Web search | DuckDuckGo via `ddgs` library |
+| HTML parsing | BeautifulSoup4 + lxml |
 | Container | Docker + docker-compose |
 
-### ChromaDB (Vector Database)
-- In-process vector database (`pip install chromadb`). No server needed.
-- Persistent storage to disk. Works on any platform (Linux, macOS, Windows).
+### Environment Variables (`.env`, see `.env.example`)
 
-### Environment Variables (see .env.example)
-- `ANTHROPIC_API_KEY` — Claude API key
-- `TELEGRAM_BOT_TOKEN` — Bot token from @BotFather
-- `EMBEDDING_MODEL` — Embedding model name (default: intfloat/multilingual-e5-large)
-- `CHROMA_DB_PATH` — Path to ChromaDB database directory
-- `TELEGRAM_EXPORT_PATH` — Path to Telegram HTML exports
-- `CLAUDE_MODEL` — Claude model ID
+`ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `EMBEDDING_MODEL`, `CHROMA_DB_PATH`, `TELEGRAM_EXPORT_PATH`, `CLAUDE_MODEL`, `LOG_LEVEL`
 
-## Key Technical Considerations
+### Docker Volumes
 
-- **HTML parsing**: The Telegram export uses a consistent HTML structure. Use BeautifulSoup or similar to extract message text, sender, timestamp, reply chains, and media references from the `messages*.html` files.
-- **Language**: Chat messages are primarily in **Brazilian Portuguese (pt-BR)**. Embedding and retrieval models must handle Portuguese well.
-- **Media files**: Voice messages (OGG) and videos (MP4) exist but require transcription (e.g., Whisper) to be included in the RAG knowledge base.
-- **Incremental exports**: As the user continues exporting chat history, new `messages*.html` files may be added. The ingestion pipeline should handle re-processing gracefully.
-- **zvec runs in-process**: Unlike client-server vector DBs, zvec stores data to a local directory and loads it in-process. The Docker volume must persist the zvec data directory.
+- `./data/chroma_db:/app/data/chroma_db` — persisted vector database
+- `./data/telegram_export:/app/data/telegram_export` — Telegram HTML exports
+
+## Telegram Export HTML Format
+
+Messages live in `messages.html` through `messages20.html`. Key selectors:
+- `div.message.default` (with `id="message{N}"`) — regular messages
+- `div.message.default.joined` — continuation messages (no author, inherits from previous)
+- `div.message.service` — system events (skip these)
+- `.from_name` — author (direct child of `.body`, not from `.forwarded.body`)
+- `.pull_right.date.details[title]` — timestamp as `DD.MM.YYYY HH:MM:SS UTC-03:00`
+- `.reply_to a[onclick="GoToMessage(N)"]` — reply references
+- `.media_wrap` — media: `a.photo_wrap`, `a.media_photo`, `a.video_file_wrap`, `a.media_video`, `a.media_voice_message`
+- `.forwarded.body > .from_name` — forwarded message original author (may have appended date to strip)
+
+## Gotchas
+
+- **Python version**: Requires 3.10–3.12 (sentence-transformers/ChromaDB compatibility).
+- **First run is slow**: Embedding model (~2.3 GB) downloads on first use.
+- **Tests are offline**: Tests use fixtures with sample HTML, no API keys or DB needed. `asyncio_mode = "auto"` in pyproject.toml.
+- **Two photo CSS classes**: Telegram export uses both `a.photo_wrap` and `a.media_photo` for photos — parser checks both.
