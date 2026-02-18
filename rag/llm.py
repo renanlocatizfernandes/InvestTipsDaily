@@ -24,7 +24,7 @@ def generate_response(
     system_prompt: str,
     user_message: str,
     context: str = "",
-    max_tokens: int = 1024,
+    max_tokens: int = 512,
 ) -> str:
     """Send a message to Claude and return the response text.
 
@@ -41,11 +41,17 @@ def generate_response(
     parts = []
     if context:
         parts.append(
-            "Aqui estão mensagens relevantes do grupo que podem ajudar a responder:\n\n"
+            "Contexto relevante:\n\n"
             f"{context}\n\n---\n"
         )
-    parts.append(f"Pergunta do usuário: {user_message}")
+    parts.append(
+        f"Pergunta: {user_message}\n\n"
+        "Responda de forma concisa e direta. "
+        "Adapte o tamanho ao que a pergunta exige — sem enrolação."
+    )
     full_user_message = "\n".join(parts)
+
+    logger.info("Calling Claude (%s) max_tokens=%d", model, max_tokens)
 
     message = client.messages.create(
         model=model,
@@ -54,4 +60,9 @@ def generate_response(
         messages=[{"role": "user", "content": full_user_message}],
     )
 
+    usage = message.usage
+    logger.info(
+        "Claude response: %d chars, tokens in=%d out=%d",
+        len(message.content[0].text), usage.input_tokens, usage.output_tokens,
+    )
     return message.content[0].text

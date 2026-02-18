@@ -22,6 +22,7 @@ from bot.handlers import (
     cmd_start,
     cmd_tips,
     handle_mention,
+    handle_reply,
 )
 
 load_dotenv()
@@ -33,12 +34,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _preload_models() -> None:
+    """Preload heavy models at startup so first request isn't slow."""
+    logger.info("Preloading embedding model...")
+    try:
+        from rag.embedder import _get_model
+        _get_model()
+        logger.info("Embedding model ready.")
+    except Exception:
+        logger.exception("Failed to preload embedding model")
+
+    logger.info("Preloading ChromaDB collection...")
+    try:
+        from rag.pipeline import _get_collection
+        _get_collection()
+        logger.info("ChromaDB collection ready.")
+    except Exception:
+        logger.exception("Failed to preload ChromaDB collection")
+
+
 def main() -> None:
     """Start the bot."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         logger.error("TELEGRAM_BOT_TOKEN not set. Exiting.")
         raise SystemExit(1)
+
+    # Preload models before starting to accept requests
+    _preload_models()
 
     app = ApplicationBuilder().token(token).build()
 
@@ -55,6 +78,14 @@ def main() -> None:
         MessageHandler(
             filters.TEXT & filters.Entity("mention"),
             handle_mention,
+        )
+    )
+
+    # Handle replies to bot messages
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.REPLY,
+            handle_reply,
         )
     )
 

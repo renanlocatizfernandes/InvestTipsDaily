@@ -10,12 +10,14 @@ import chromadb
 
 from rag.embedder import embed_query
 from rag.llm import generate_response
+from rag.web_search import needs_realtime_data, web_search
 from bot.identity import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "telegram_messages"
-TOP_K = 10
+TOP_K = 8
+MIN_RELEVANCE_SCORE = 0.3  # Filter out low-relevance results
 
 _collection = None
 
@@ -69,38 +71,52 @@ def search(query_text: str, top_k: int = TOP_K) -> list[dict]:
     return documents
 
 
-def _format_context(documents: list[dict]) -> str:
-    """Format retrieved documents into a context string for the LLM."""
-    if not documents:
-        return ""
-
+def _format_context(documents: list[dict], web_results: str = "") -> str:
+    """Format retrieved documents and web results into a context string."""
     parts = []
-    for i, doc in enumerate(documents, 1):
-        authors = ", ".join(doc["authors"]) if isinstance(doc["authors"], list) else doc["authors"]
-        header = f"[Trecho {i}] Autores: {authors} | Período: {doc['start_time']} — {doc['end_time']}"
-        parts.append(f"{header}\n{doc['text']}")
+
+    if documents:
+        for i, doc in enumerate(documents, 1):
+            authors = ", ".join(doc["authors"]) if isinstance(doc["authors"], list) else doc["authors"]
+            header = f"[Trecho {i}] Autores: {authors} | Período: {doc['start_time']} — {doc['end_time']}"
+            parts.append(f"{header}\n{doc['text']}")
+
+    if web_results:
+        parts.append(f"[Dados atuais da web]\n{web_results}")
 
     return "\n\n".join(parts)
 
 
 def query(user_question: str, top_k: int = TOP_K) -> str:
-    """Full RAG pipeline: search + generate response."""
+    """Full RAG pipeline: search + optional web search + generate response."""
     documents = search(user_question, top_k=top_k)
-    context = _format_context(documents)
+
+    # Filter low-relevance results
+    relevant_docs = [d for d in documents if d["score"] >= MIN_RELEVANCE_SCORE]
+    logger.info(
+        "RAG search: %d/%d results above threshold (%.2f)",
+        len(relevant_docs), len(documents), MIN_RELEVANCE_SCORE,
+    )
+
+    # Check if we need real-time data
+    web_results = ""
+    if needs_realtime_data(user_question):
+        logger.info("Question needs real-time data, searching web...")
+        web_results = web_search(user_question)
+
+    context = _format_context(relevant_docs, web_results)
 
     if not context:
-        context_note = (
+        context = (
             "Nenhuma mensagem relevante foi encontrada no histórico do grupo. "
             "Responda com base no seu conhecimento geral, mas deixe claro que "
             "não encontrou referências específicas do grupo."
         )
-    else:
-        context_note = context
 
     return generate_response(
         system_prompt=SYSTEM_PROMPT,
         user_message=user_question,
-        context=context_note,
+        context=context,
     )
 
 
