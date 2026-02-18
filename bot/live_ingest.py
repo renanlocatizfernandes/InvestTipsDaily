@@ -113,10 +113,14 @@ def telegram_message_to_dataclass(message) -> TelegramMessage | None:
     if message.reply_to_message:
         reply_to_id = message.reply_to_message.message_id
 
-    is_forwarded = message.forward_date is not None
+    # python-telegram-bot v22+ uses forward_origin instead of forward_date/forward_from
+    forward_origin = getattr(message, "forward_origin", None)
+    is_forwarded = forward_origin is not None
     forwarded_from = None
-    if is_forwarded and message.forward_from:
-        forwarded_from = message.forward_from.full_name or message.forward_from.first_name
+    if is_forwarded and forward_origin:
+        sender = getattr(forward_origin, "sender_user", None)
+        if sender:
+            forwarded_from = sender.full_name or sender.first_name
 
     return TelegramMessage(
         id=message.message_id,

@@ -118,8 +118,7 @@ class TestTelegramMessageConversion:
         user_id: int = 12345,
         date: datetime | None = None,
         reply_to_message: MagicMock | None = None,
-        forward_date: datetime | None = None,
-        forward_from: MagicMock | None = None,
+        forward_origin: MagicMock | None = None,
     ) -> MagicMock:
         """Create a mock telegram.Message object."""
         msg = MagicMock()
@@ -127,8 +126,7 @@ class TestTelegramMessageConversion:
         msg.text = text
         msg.date = date or datetime(2024, 10, 15, 18, 30, 0, tzinfo=timezone.utc)
         msg.reply_to_message = reply_to_message
-        msg.forward_date = forward_date
-        msg.forward_from = forward_from
+        msg.forward_origin = forward_origin
 
         user = MagicMock()
         user.id = user_id
@@ -178,9 +176,10 @@ class TestTelegramMessageConversion:
         fwd_user = MagicMock()
         fwd_user.full_name = "Carlos Silva"
         fwd_user.first_name = "Carlos"
+        forward_origin = MagicMock()
+        forward_origin.sender_user = fwd_user
         msg = self._make_telegram_message(
-            forward_date=datetime(2024, 10, 10, 12, 0, 0, tzinfo=timezone.utc),
-            forward_from=fwd_user,
+            forward_origin=forward_origin,
         )
 
         result = telegram_message_to_dataclass(msg)
@@ -237,8 +236,7 @@ class TestHandleNewMessage:
         message.text = text
         message.date = datetime(2024, 10, 15, 20, 0, 0, tzinfo=timezone.utc)
         message.reply_to_message = None
-        message.forward_date = None
-        message.forward_from = None
+        message.forward_origin = None
 
         from_user = MagicMock()
         from_user.id = user_id

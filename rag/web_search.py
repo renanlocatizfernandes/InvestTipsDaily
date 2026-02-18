@@ -46,37 +46,75 @@ def needs_realtime_data(question: str) -> bool:
 
 def _optimize_query(question: str) -> str:
     """Optimize search query for better crypto/finance results."""
-    # Add context if not already crypto-specific
     lower = question.lower()
     has_crypto_term = any(t in lower for t in [
         "bitcoin", "ethereum", "cripto", "crypto", "btc", "eth", "defi",
         "blockchain", "token", "moeda", "coin",
     ])
+    has_market_term = any(t in lower for t in [
+        "mercado", "bolsa", "ações", "acoes", "ibovespa", "dolar", "dólar",
+        "selic", "juros",
+    ])
     if has_crypto_term:
         return f"{question} preço cotação hoje"
-    return f"{question} cripto investimento"
+    if has_market_term:
+        return f"{question} cotação hoje"
+    return f"{question} cripto investimento hoje"
 
 
-def web_search(query: str, max_results: int = 3) -> str:
-    """Search the web and return formatted results.
-
-    Returns a formatted string with search results, or empty string on failure.
-    """
-    optimized = _optimize_query(query)
+def _search_news(query: str, max_results: int = 3) -> list[str]:
+    """Search DuckDuckGo news for recent results."""
     try:
         with DDGS() as ddgs:
-            results = list(ddgs.text(optimized, region="br-pt", max_results=max_results))
+            results = list(ddgs.news(query, region="br-pt", max_results=max_results))
+        parts = []
+        for r in results:
+            title = r.get("title", "")
+            body = r.get("body", "")
+            date = r.get("date", "")
+            source = r.get("source", "")
+            if date:
+                parts.append(f"- [{source} {date[:10]}] {title}: {body}")
+            else:
+                parts.append(f"- [{source}] {title}: {body}")
+        return parts
+    except Exception:
+        logger.exception("News search failed for: %s", query)
+        return []
 
-        if not results:
-            return ""
 
+def _search_text(query: str, max_results: int = 3) -> list[str]:
+    """Search DuckDuckGo text for general results."""
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, region="br-pt", max_results=max_results))
         parts = []
         for r in results:
             title = r.get("title", "")
             body = r.get("body", "")
             parts.append(f"- {title}: {body}")
-
-        return "\n".join(parts)
+        return parts
     except Exception:
-        logger.exception("Web search failed for query: %s", optimized)
+        logger.exception("Text search failed for: %s", query)
+        return []
+
+
+def web_search(query: str, max_results: int = 3) -> str:
+    """Search the web and return formatted results.
+
+    Combines news + text results for better coverage of real-time data.
+    Returns a formatted string with search results, or empty string on failure.
+    """
+    optimized = _optimize_query(query)
+
+    # Try news first (more likely to have current data)
+    news_parts = _search_news(optimized, max_results=max_results)
+
+    # Also try text search for broader coverage
+    text_parts = _search_text(optimized, max_results=max_results)
+
+    all_parts = news_parts + text_parts
+    if not all_parts:
         return ""
+
+    return "\n".join(all_parts)

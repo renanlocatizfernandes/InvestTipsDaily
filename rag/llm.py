@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone, timedelta
 
 import anthropic
 
@@ -43,7 +44,11 @@ def generate_response(
     model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
     # Build the user message with context
+    brt = timezone(timedelta(hours=-3))
+    now_brt = datetime.now(brt).strftime("%d/%m/%Y %H:%M")
+
     parts = []
+    parts.append(f"[Data/hora atual: {now_brt} BRT]\n")
     if context:
         parts.append(
             "Contexto relevante:\n\n"
