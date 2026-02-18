@@ -9,11 +9,14 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
 )
 
+from bot.admin import cmd_config, cmd_reindex, cmd_stats
+from bot.feedback import handle_feedback_callback
 from bot.handlers import (
     cmd_ajuda,
     cmd_buscar,
@@ -24,6 +27,9 @@ from bot.handlers import (
     handle_mention,
     handle_reply,
 )
+from bot.health import cmd_health
+from bot.live_ingest import setup_live_ingestion
+from bot.scheduler import setup_scheduler
 
 load_dotenv()
 
@@ -72,6 +78,15 @@ def main() -> None:
     app.add_handler(CommandHandler("resumo", cmd_resumo))
     app.add_handler(CommandHandler("sobre", cmd_sobre))
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
+    app.add_handler(CommandHandler("health", cmd_health))
+
+    # Admin-only commands
+    app.add_handler(CommandHandler("reindex", cmd_reindex))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("config", cmd_config))
+
+    # Handle feedback button presses
+    app.add_handler(CallbackQueryHandler(handle_feedback_callback))
 
     # Handle @mentions in group messages
     app.add_handler(
@@ -88,6 +103,12 @@ def main() -> None:
             handle_reply,
         )
     )
+
+    # Set up live ingestion of new group messages
+    setup_live_ingestion(app)
+
+    # Set up scheduled daily summary
+    setup_scheduler(app)
 
     logger.info("TipsAI bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "lxml>=5.0.0",
     "ddgs>=7.0.0",
+    "openai-whisper>=20231117",
 ]
 
 [project.optional-dependencies]

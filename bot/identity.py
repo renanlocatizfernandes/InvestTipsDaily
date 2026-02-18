@@ -52,9 +52,12 @@ ABOUT_TEXT = (
 HELP_TEXT = (
     "\U0001f4cb *Comandos disponíveis:*\n\n"
     "/tips <pergunta> — Pergunta livre ao bot\n"
-    "/buscar <termo> — Busca semântica no histórico do grupo\n"
-    "/resumo — Resumo das últimas conversas relevantes\n"
-    "/sobre — Informações sobre o bot e o canal\n"
-    "/ajuda — Esta mensagem de ajuda\n\n"
-    "_Você também pode me mencionar com @{bot_username} seguido da sua pergunta._"
+    "/buscar <termo> — Busca semântica no histórico\n"
+    "/resumo — Resumo das últimas conversas\n"
+    "/health — Status e métricas do bot\n"
+    "/sobre — Sobre o bot e o canal\n"
+    "/ajuda — Esta mensagem\n\n"
+    "\U0001f512 *Admin:* /reindex /stats /config\n\n"
+    "_Filtros no /buscar:_ `autor:Nome de:YYYY-MM-DD ate:YYYY-MM-DD`\n"
+    "_Mencione @{bot_username} com uma pergunta para interagir._"
 )

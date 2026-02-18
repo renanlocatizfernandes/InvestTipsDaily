@@ -25,6 +25,7 @@ def generate_response(
     user_message: str,
     context: str = "",
     max_tokens: int = 512,
+    history: list[dict] | None = None,
 ) -> str:
     """Send a message to Claude and return the response text.
 
@@ -33,6 +34,10 @@ def generate_response(
         user_message: The user's question.
         context: Retrieved context from RAG (injected into the user message).
         max_tokens: Max response length.
+        history: Optional list of previous exchanges as
+                 ``[{"role": "user"|"assistant", "content": "..."}]``.
+                 When provided, they are prepended to the messages list
+                 so Claude has conversation context.
     """
     client = _get_client()
     model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
@@ -51,13 +56,19 @@ def generate_response(
     )
     full_user_message = "\n".join(parts)
 
-    logger.info("Calling Claude (%s) max_tokens=%d", model, max_tokens)
+    # Build messages list: optional history + current user message
+    messages: list[dict] = []
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": full_user_message})
+
+    logger.info("Calling Claude (%s) max_tokens=%d history=%d", model, max_tokens, len(history or []))
 
     message = client.messages.create(
         model=model,
         max_tokens=max_tokens,
         system=system_prompt,
-        messages=[{"role": "user", "content": full_user_message}],
+        messages=messages,
     )
 
     usage = message.usage

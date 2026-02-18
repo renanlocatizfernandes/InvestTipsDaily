@@ -11,6 +11,8 @@ import chromadb
 
 from ingestion.parser import parse_all_exports
 from ingestion.chunker import chunk_messages
+from ingestion.transcriber import transcribe_audio
+from ingestion.image_analyzer import analyze_image
 from rag.embedder import embed_texts
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,34 @@ def run_ingestion(export_path: str | None = None, db_path: str | None = None) ->
     logger.info("Parsing HTML exports from %s ...", export_path)
     all_messages = parse_all_exports(export_path)
     logger.info("Parsed %d messages total.", len(all_messages))
+
+    # Step 1.5: Transcribe voice messages
+    voice_messages = [m for m in all_messages if m.media_type == "voice" and m.media_path]
+    if voice_messages:
+        logger.info("Found %d voice messages to transcribe.", len(voice_messages))
+        transcribed_count = 0
+        for msg in voice_messages:
+            audio_path = os.path.join(export_path, msg.media_path)
+            transcription = transcribe_audio(audio_path)
+            if transcription:
+                prefix = f"{msg.text}\n" if msg.text else ""
+                msg.text = f"{prefix}[Transcrição de áudio] {transcription}"
+                transcribed_count += 1
+        logger.info("Transcribed %d of %d voice messages.", transcribed_count, len(voice_messages))
+
+    # Step 1.6: Analyze images in photo messages
+    photo_messages = [m for m in all_messages if m.media_type == "photo" and m.media_path]
+    if photo_messages:
+        logger.info("Found %d photo messages to analyze.", len(photo_messages))
+        analyzed_count = 0
+        for msg in photo_messages:
+            image_path = os.path.join(export_path, msg.media_path)
+            description = analyze_image(image_path)
+            if description:
+                prefix = f"{msg.text}\n" if msg.text else ""
+                msg.text = f"{prefix}[Descrição da imagem] {description}"
+                analyzed_count += 1
+        logger.info("Analyzed %d of %d photo messages.", analyzed_count, len(photo_messages))
 
     # Step 2: Filter out already-processed messages
     processed_ids = _load_processed_ids(db_path)
