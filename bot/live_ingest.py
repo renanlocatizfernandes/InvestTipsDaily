@@ -267,12 +267,19 @@ def setup_live_ingestion(application: Application) -> None:
     )
 
     # Schedule periodic flush check every 60 seconds
-    application.job_queue.run_repeating(
-        _periodic_flush,
-        interval=60,
-        first=60,
-        name="live_ingest_flush",
-    )
+    job_queue = application.job_queue
+    if job_queue is None:
+        logger.warning(
+            "JobQueue not available — periodic flush disabled. "
+            "Install python-telegram-bot[job-queue] to enable."
+        )
+    else:
+        job_queue.run_repeating(
+            _periodic_flush,
+            interval=60,
+            first=60,
+            name="live_ingest_flush",
+        )
 
     logger.info(
         "Live ingestion configurada: batch_threshold=%d, flush_interval=%ds",
