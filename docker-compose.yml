@@ -8,6 +8,7 @@ services:
     volumes:
       - ./data/chroma_db:/app/data/chroma_db
       - ./data/telegram_export:/app/data/telegram_export
+      - model_cache:/app/data/model_cache
     restart: unless-stopped
     deploy:
       resources:
@@ -25,3 +26,6 @@ services:
       timeout: 10s
       start_period: 15s
       retries: 3
+
+volumes:
+  model_cache:

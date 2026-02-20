@@ -20,20 +20,25 @@ COPY bot/ bot/
 COPY rag/ rag/
 COPY ingestion/ ingestion/
 COPY docker/healthcheck.py /app/healthcheck.py
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # Create non-root user
 RUN groupadd --gid 1001 appuser && \
-    useradd --uid 1001 --gid 1001 --no-create-home --shell /bin/false appuser
+    useradd --uid 1001 --gid 1001 --create-home --shell /bin/sh appuser
+
+# HuggingFace/sentence-transformers cache inside container
+ENV HF_HOME=/app/data/model_cache
+ENV SENTENCE_TRANSFORMERS_HOME=/app/data/model_cache
 
 # Create data directories and set ownership
-RUN mkdir -p /app/data/chroma_db /app/data/telegram_export && \
+RUN mkdir -p /app/data/chroma_db /app/data/telegram_export /app/data/model_cache && \
     chown -R appuser:appuser /app/data
 
-# Switch to non-root user
-USER appuser
-
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD ["python", "/app/healthcheck.py"]
 
+# Entrypoint fixes volume permissions then drops to non-root user
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "-m", "bot.main"]
