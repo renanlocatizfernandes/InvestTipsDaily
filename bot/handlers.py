@@ -7,11 +7,17 @@ import logging
 import re
 import time
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from bot.identity import ABOUT_TEXT, HELP_TEXT, BOT_USERNAME
+from bot.exceptions import (
+    RateLimitExceededError,
+    RAGError,
+    SearchError,
+    TipsAIError,
+)
 from bot.feedback import create_feedback_keyboard, store_query_for_message
 from bot.health import metrics
 from bot.rate_limit import rate_limiter, RATE_LIMIT_MSG
@@ -86,14 +92,12 @@ def _escape_markdown(text: str) -> str:
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
 
 
-async def _check_rate_limit(update: Update) -> bool:
-    """Check rate limit for the user. Returns True if blocked (over limit)."""
+def _check_rate_limit(update: Update) -> None:
+    """Check rate limit for the user. Raises RateLimitExceededError if over limit."""
     user_id = update.effective_user.id
     if not rate_limiter.is_allowed(user_id):
         wait = rate_limiter.get_wait_time(user_id)
-        await update.message.reply_text(RATE_LIMIT_MSG.format(seconds=wait))
-        return True
-    return False
+        raise RateLimitExceededError(wait)
 
 
 async def _send_response_with_feedback(
@@ -110,11 +114,80 @@ async def _send_response_with_feedback(
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command."""
-    await update.message.reply_text(
-        "Fala! Eu sou o TipsAI, assistente do Invest Tips Daily. "
-        "Use /ajuda pra ver o que eu posso fazer."
+    """Handle /start command with welcome message and quick-action buttons."""
+    welcome_text = (
+        "Fala! Eu sou o *TipsAI*, o assistente inteligente do "
+        "*Invest Tips Daily* \U0001f9e0\n\n"
+        "Sou a memória viva do grupo — posso responder perguntas, "
+        "buscar conversas antigas, fazer resumos e muito mais.\n\n"
+        "Escolhe uma opção abaixo pra começar ou manda /ajuda a qualquer momento:"
     )
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Fazer uma pergunta", callback_data="help_tips"),
+            InlineKeyboardButton("Buscar no grupo", callback_data="help_buscar"),
+        ],
+        [
+            InlineKeyboardButton("Ver ajuda", callback_data="help_ajuda"),
+            InlineKeyboardButton("Status do bot", callback_data="help_status"),
+        ],
+    ])
+    await update.message.reply_text(
+        welcome_text, parse_mode="Markdown", reply_markup=keyboard,
+    )
+
+
+async def start_button_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle presses on the /start inline keyboard buttons."""
+    query = update.callback_query
+    await query.answer()
+
+    responses = {
+        "help_tips": (
+            "\U0001f4ac *Fazer uma pergunta*\n\n"
+            "Use o comando /tips seguido da sua pergunta. Exemplo:\n"
+            "`/tips o que é staking?`\n\n"
+            "Você também pode me marcar no grupo com @{bot_username} "
+            "e a pergunta, ou simplesmente responder a uma mensagem minha."
+        ),
+        "help_buscar": (
+            "\U0001f50d *Buscar no grupo*\n\n"
+            "Use o comando /buscar seguido do termo. Exemplo:\n"
+            "`/buscar CoinTech2U rendimento`\n\n"
+            "Filtros opcionais:\n"
+            "• `autor:Nome` — filtra por autor\n"
+            "• `de:YYYY-MM-DD` — data inicial\n"
+            "• `ate:YYYY-MM-DD` — data final\n\n"
+            "Exemplo completo:\n"
+            "`/buscar autor:Renan bitcoin de:2024-08-01 ate:2024-09-30`"
+        ),
+        "help_ajuda": (
+            "\U0001f4cb *Comandos disponíveis*\n\n"
+            "/tips <pergunta> — Pergunta livre ao bot\n"
+            "/buscar <termo> — Busca semântica no histórico\n"
+            "/resumo — Resumo das últimas conversas\n"
+            "/health — Status e métricas do bot\n"
+            "/sobre — Sobre o bot e o canal\n"
+            "/ajuda — Lista completa de comandos"
+        ),
+        "help_status": (
+            "\U00002699 *Status do bot*\n\n"
+            "Para ver o status atual, métricas de uso e tempo de atividade "
+            "do TipsAI, use o comando:\n"
+            "`/health`"
+        ),
+    }
+
+    data = query.data
+    text = responses.get(data)
+    if text is None:
+        return
+
+    username = await _get_bot_username(context)
+    text = text.format(bot_username=username)
+    await query.edit_message_text(text, parse_mode="Markdown")
 
 
 async def cmd_tips(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -126,14 +199,12 @@ async def cmd_tips(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    if await _check_rate_limit(update):
-        return
-
     user_id = update.effective_user.id
     logger.info("User %s asked /tips: %s", update.effective_user.first_name, question)
     start = time.monotonic()
 
     try:
+        _check_rate_limit(update)
         response = await _run_with_typing(
             update, asyncio.to_thread(rag_query, question, user_id=user_id)
         )
@@ -141,9 +212,18 @@ async def cmd_tips(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         metrics.record_query(elapsed)
         logger.info("/tips response in %.1fs (%d chars)", elapsed, len(response))
         await _send_response_with_feedback(update, response, question)
+    except RateLimitExceededError as exc:
+        logger.info("Rate limit hit for user %s: %s", user_id, exc)
+        await update.message.reply_text(RATE_LIMIT_MSG.format(seconds=exc.wait_seconds))
+    except RAGError as exc:
+        metrics.record_error()
+        logger.error("%s in /tips handler: %s", type(exc).__name__, exc)
+        await update.message.reply_text(
+            "Deu um erro ao processar sua pergunta. Tenta de novo daqui a pouco."
+        )
     except Exception:
         metrics.record_error()
-        logger.exception("Error in /tips handler")
+        logger.exception("Unexpected %s in /tips handler", "error")
         await update.message.reply_text(
             "Deu um erro aqui. Tenta de novo daqui a pouco."
         )
@@ -155,9 +235,6 @@ async def cmd_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     Supports inline filters:
         /buscar autor:Renan bitcoin de:2024-08-01 ate:2024-09-30
     """
-    if await _check_rate_limit(update):
-        return
-
     raw_term = " ".join(context.args) if context.args else ""
     if not raw_term:
         await update.message.reply_text(
@@ -191,6 +268,7 @@ async def cmd_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     start = time.monotonic()
 
     try:
+        _check_rate_limit(update)
         results = await _run_with_typing(
             update,
             asyncio.to_thread(
@@ -233,9 +311,18 @@ async def cmd_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             parts.append(f"{i}. [{score_pct}%] {authors} ({doc['start_time'][:10]}):\n{text_preview}\n")
 
         await _send_long_message(update, "\n".join(parts))
+    except RateLimitExceededError as exc:
+        logger.info("Rate limit hit for user %s: %s", update.effective_user.id, exc)
+        await update.message.reply_text(RATE_LIMIT_MSG.format(seconds=exc.wait_seconds))
+    except SearchError as exc:
+        metrics.record_error()
+        logger.error("%s in /buscar handler: %s", type(exc).__name__, exc)
+        await update.message.reply_text(
+            "Deu um erro na busca. Tenta de novo daqui a pouco."
+        )
     except Exception:
         metrics.record_error()
-        logger.exception("Error in /buscar handler")
+        logger.exception("Unexpected %s in /buscar handler", "error")
         await update.message.reply_text(
             "Deu um erro na busca. Tenta de novo daqui a pouco."
         )
@@ -243,13 +330,11 @@ async def cmd_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_resumo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /resumo — summary of recent relevant conversations."""
-    if await _check_rate_limit(update):
-        return
-
     logger.info("User %s requested /resumo", update.effective_user.first_name)
     start = time.monotonic()
 
     try:
+        _check_rate_limit(update)
         response = await _run_with_typing(
             update,
             asyncio.to_thread(
@@ -261,9 +346,18 @@ async def cmd_resumo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         elapsed = time.monotonic() - start
         metrics.record_query(elapsed)
         await _send_long_message(update, response)
+    except RateLimitExceededError as exc:
+        logger.info("Rate limit hit for user %s: %s", update.effective_user.id, exc)
+        await update.message.reply_text(RATE_LIMIT_MSG.format(seconds=exc.wait_seconds))
+    except RAGError as exc:
+        metrics.record_error()
+        logger.error("%s in /resumo handler: %s", type(exc).__name__, exc)
+        await update.message.reply_text(
+            "Deu um erro ao gerar o resumo. Tenta de novo daqui a pouco."
+        )
     except Exception:
         metrics.record_error()
-        logger.exception("Error in /resumo handler")
+        logger.exception("Unexpected %s in /resumo handler", "error")
         await update.message.reply_text(
             "Deu um erro ao gerar o resumo. Tenta de novo daqui a pouco."
         )
@@ -303,14 +397,12 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    if await _check_rate_limit(update):
-        return
-
     user_id = update.effective_user.id
     logger.info("User %s mentioned bot: %s", update.effective_user.first_name, question)
     start = time.monotonic()
 
     try:
+        _check_rate_limit(update)
         response = await _run_with_typing(
             update, asyncio.to_thread(rag_query, question, user_id=user_id)
         )
@@ -318,9 +410,18 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         metrics.record_query(elapsed)
         logger.info("Mention response in %.1fs (%d chars)", elapsed, len(response))
         await _send_response_with_feedback(update, response, question)
+    except RateLimitExceededError as exc:
+        logger.info("Rate limit hit for user %s: %s", user_id, exc)
+        await update.message.reply_text(RATE_LIMIT_MSG.format(seconds=exc.wait_seconds))
+    except RAGError as exc:
+        metrics.record_error()
+        logger.error("%s in mention handler: %s", type(exc).__name__, exc)
+        await update.message.reply_text(
+            "Deu um erro ao processar sua pergunta. Tenta de novo daqui a pouco."
+        )
     except Exception:
         metrics.record_error()
-        logger.exception("Error in mention handler")
+        logger.exception("Unexpected %s in mention handler", "error")
         await update.message.reply_text(
             "Deu um erro aqui. Tenta de novo daqui a pouco."
         )
@@ -342,14 +443,12 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not question:
         return
 
-    if await _check_rate_limit(update):
-        return
-
     user_id = update.effective_user.id
     logger.info("User %s replied to bot: %s", update.effective_user.first_name, question)
     start = time.monotonic()
 
     try:
+        _check_rate_limit(update)
         response = await _run_with_typing(
             update, asyncio.to_thread(rag_query, question, user_id=user_id)
         )
@@ -357,9 +456,18 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         metrics.record_query(elapsed)
         logger.info("Reply response in %.1fs (%d chars)", elapsed, len(response))
         await _send_response_with_feedback(update, response, question)
+    except RateLimitExceededError as exc:
+        logger.info("Rate limit hit for user %s: %s", user_id, exc)
+        await update.message.reply_text(RATE_LIMIT_MSG.format(seconds=exc.wait_seconds))
+    except RAGError as exc:
+        metrics.record_error()
+        logger.error("%s in reply handler: %s", type(exc).__name__, exc)
+        await update.message.reply_text(
+            "Deu um erro ao processar sua pergunta. Tenta de novo daqui a pouco."
+        )
     except Exception:
         metrics.record_error()
-        logger.exception("Error in reply handler")
+        logger.exception("Unexpected %s in reply handler", "error")
         await update.message.reply_text(
             "Deu um erro aqui. Tenta de novo daqui a pouco."
         )

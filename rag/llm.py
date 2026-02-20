@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime, timezone, timedelta
 
 import anthropic
+from anthropic import APIError
 
 logger = logging.getLogger(__name__)
 
@@ -67,18 +69,45 @@ def generate_response(
         messages.extend(history)
     messages.append({"role": "user", "content": full_user_message})
 
+    fallback_model = os.getenv("CLAUDE_FALLBACK_MODEL", "claude-haiku-4-5-20251001")
+
+    # Estimate prompt size for logging (full message content)
+    prompt_chars = sum(len(m.get("content", "")) for m in messages) + len(system_prompt)
+
     logger.info("Calling Claude (%s) max_tokens=%d history=%d", model, max_tokens, len(history or []))
 
-    message = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system_prompt,
-        messages=messages,
-    )
+    llm_start = time.monotonic()
+    used_model = model
+
+    try:
+        message = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=messages,
+        )
+    except APIError as exc:
+        if fallback_model and fallback_model != model:
+            logger.warning(
+                "Primary model '%s' failed (%s). Retrying with fallback model '%s'...",
+                model, exc, fallback_model,
+            )
+            used_model = fallback_model
+            message = client.messages.create(
+                model=fallback_model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=messages,
+            )
+        else:
+            raise
+
+    llm_elapsed = time.monotonic() - llm_start
 
     usage = message.usage
     logger.info(
         "Claude response: %d chars, tokens in=%d out=%d",
         len(message.content[0].text), usage.input_tokens, usage.output_tokens,
     )
+    logger.info("LLM response in %.2fs (model=%s, ~%d prompt chars)", llm_elapsed, used_model, prompt_chars)
     return message.content[0].text

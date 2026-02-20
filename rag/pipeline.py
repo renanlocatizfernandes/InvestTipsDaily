@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
+import uuid
 
 import chromadb
 
 from rag.embedder import embed_query
-from rag.llm import generate_response
+from rag.llm import generate_response, _get_client
 from rag.web_search import needs_realtime_data, web_search
 from bot.identity import SYSTEM_PROMPT
 from bot.memory import add_message, get_history
@@ -21,6 +23,18 @@ TOP_K = 8
 MIN_RELEVANCE_SCORE = 0.3  # Filter out low-relevance results
 
 _collection = None
+
+# In-memory TTL cache for RAG responses: {normalized_query: (response, timestamp)}
+_response_cache: dict[str, tuple[str, float]] = {}
+CACHE_TTL = 300  # 5 minutes
+
+
+def _normalize_query(query: str) -> str:
+    """Normalize a query string for cache key matching.
+
+    Lowercases, strips whitespace, and collapses internal whitespace.
+    """
+    return " ".join(query.lower().strip().split())
 
 
 def _get_collection():
@@ -67,6 +81,69 @@ def _build_where_clause(
     if len(conditions) == 1:
         return conditions[0]
     return {"$and": conditions}
+
+
+def _rerank(query: str, documents: list[dict]) -> list[dict]:
+    """Rerank retrieved documents using Claude as a lightweight relevance scorer.
+
+    Sends each chunk's text to Claude and asks for a 0-10 relevance score.
+    Returns documents sorted by descending relevance score.
+
+    Falls back to original order on any error.
+    """
+    if not documents:
+        return documents
+
+    # Build a compact numbered list of chunk previews (first 200 chars each)
+    chunk_summaries = []
+    for i, doc in enumerate(documents):
+        preview = doc["text"][:200].replace("\n", " ")
+        chunk_summaries.append(f"{i}: {preview}")
+    chunks_text = "\n".join(chunk_summaries)
+
+    prompt = (
+        f"Query: {query}\n\n"
+        f"Rate each chunk's relevance to the query (0=irrelevant, 10=perfect match). "
+        f"Reply with ONLY comma-separated integers, one per chunk, in order.\n\n"
+        f"{chunks_text}"
+    )
+
+    try:
+        client = _get_client()
+        model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+
+        response = client.messages.create(
+            model=model,
+            max_tokens=64,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        scores_text = response.content[0].text.strip()
+        scores = [int(s.strip()) for s in scores_text.split(",")]
+
+        if len(scores) != len(documents):
+            logger.warning(
+                "Reranking score count mismatch: got %d, expected %d. Using original order.",
+                len(scores), len(documents),
+            )
+            return documents
+
+        # Attach scores and sort descending
+        for doc, score in zip(documents, scores):
+            doc["rerank_score"] = score
+
+        reranked = sorted(documents, key=lambda d: d["rerank_score"], reverse=True)
+
+        logger.info(
+            "Reranked %d chunks. Scores: %s",
+            len(reranked),
+            ", ".join(str(d["rerank_score"]) for d in reranked),
+        )
+        return reranked
+
+    except Exception:
+        logger.warning("Reranking failed, using original order.", exc_info=True)
+        return documents
 
 
 def search(
@@ -125,6 +202,12 @@ def search(
                 "score": 1 - distance if distance is not None else 0,
             })
 
+    # LLM-based reranking (opt-in via ENABLE_RERANKING=true)
+    reranking_enabled = os.getenv("ENABLE_RERANKING", "false").lower() in ("true", "1", "yes")
+    if reranking_enabled and len(documents) >= 3:
+        logger.info("Reranking %d results with LLM...", len(documents))
+        documents = _rerank(query_text, documents)
+
     return documents
 
 
@@ -154,19 +237,45 @@ def query(user_question: str, top_k: int = TOP_K, user_id: int | None = None) ->
                  history is fetched from memory, passed to the LLM, and
                  the new exchange is stored.
     """
+    request_id = uuid.uuid4().hex[:8]
+    pipeline_start = time.monotonic()
+
+    logger.info("[%s] Pipeline started for query: %.80s", request_id, user_question)
+
+    # Check response cache
+    cache_key = _normalize_query(user_question)
+    now = time.monotonic()
+    if cache_key in _response_cache:
+        cached_response, cached_at = _response_cache[cache_key]
+        if now - cached_at < CACHE_TTL:
+            logger.info("[%s] Cache hit for query: '%s' (age=%.1fs)", request_id, cache_key[:80], now - cached_at)
+            # Still store in memory so conversation history is consistent
+            if user_id is not None:
+                add_message(user_id, "user", user_question)
+                add_message(user_id, "assistant", cached_response)
+            return cached_response
+        else:
+            # Expired entry — remove it
+            del _response_cache[cache_key]
+
+    # --- Search stage ---
+    logger.info("[%s] Search start", request_id)
+    search_start = time.monotonic()
     documents = search(user_question, top_k=top_k)
+    search_elapsed = time.monotonic() - search_start
+    logger.info("[%s] Search completed: %d results in %.2fs", request_id, len(documents), search_elapsed)
 
     # Filter low-relevance results
     relevant_docs = [d for d in documents if d["score"] >= MIN_RELEVANCE_SCORE]
     logger.info(
-        "RAG search: %d/%d results above threshold (%.2f)",
-        len(relevant_docs), len(documents), MIN_RELEVANCE_SCORE,
+        "[%s] RAG search: %d/%d results above threshold (%.2f)",
+        request_id, len(relevant_docs), len(documents), MIN_RELEVANCE_SCORE,
     )
 
     # Check if we need real-time data
     web_results = ""
     if needs_realtime_data(user_question):
-        logger.info("Question needs real-time data, searching web...")
+        logger.info("[%s] Question needs real-time data, searching web...", request_id)
         web_results = web_search(user_question)
 
     context = _format_context(relevant_docs, web_results)
@@ -185,17 +294,29 @@ def query(user_question: str, top_k: int = TOP_K, user_id: int | None = None) ->
         if raw_history:
             history = [{"role": role, "content": text} for role, text in raw_history]
 
+    # --- LLM stage ---
+    logger.info("[%s] LLM call start", request_id)
+    llm_start = time.monotonic()
     response = generate_response(
         system_prompt=SYSTEM_PROMPT,
         user_message=user_question,
         context=context,
         history=history,
     )
+    llm_elapsed = time.monotonic() - llm_start
+    logger.info("[%s] LLM call completed in %.2fs", request_id, llm_elapsed)
+
+    # Store response in cache
+    _response_cache[cache_key] = (response, time.monotonic())
+    logger.info("[%s] Cached response for query: '%s'", request_id, cache_key[:80])
 
     # Store the new exchange in memory
     if user_id is not None:
         add_message(user_id, "user", user_question)
         add_message(user_id, "assistant", response)
+
+    pipeline_elapsed = time.monotonic() - pipeline_start
+    logger.info("[%s] Pipeline completed in %.2fs (search=%.2fs, llm=%.2fs)", request_id, pipeline_elapsed, search_elapsed, llm_elapsed)
 
     return response
 

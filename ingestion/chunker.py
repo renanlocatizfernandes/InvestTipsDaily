@@ -13,6 +13,11 @@ CONVERSATION_GAP = timedelta(minutes=30)
 # Target token count per chunk (rough: 1 token ≈ 4 chars in Portuguese)
 TARGET_CHARS = 2000  # ~500 tokens
 
+# Overlap between consecutive chunks to preserve context at boundaries.
+# When a conversation group is split, the next chunk starts with ~OVERLAP_CHARS
+# worth of messages carried over from the end of the previous chunk.
+OVERLAP_CHARS = 200
+
 
 @dataclass
 class MessageChunk:
@@ -96,31 +101,61 @@ def chunk_messages(messages: list[TelegramMessage]) -> list[MessageChunk]:
 
     groups.append(current_group)
 
-    # Phase 2: Break large groups into sized chunks
+    # Phase 2: Break large groups into sized chunks (with overlap)
     chunks: list[MessageChunk] = []
     for group in groups:
-        current_texts: list[str] = []
-        current_msgs: list[TelegramMessage] = []
-        current_len = 0
-
-        for msg in group:
-            formatted = _format_message(msg)
-            msg_len = len(formatted)
-
-            if current_len + msg_len > TARGET_CHARS and current_msgs:
-                chunks.append(_make_chunk(current_msgs, current_texts))
-                current_texts = []
-                current_msgs = []
-                current_len = 0
-
-            current_texts.append(formatted)
-            current_msgs.append(msg)
-            current_len += msg_len
-
-        if current_msgs:
-            chunks.append(_make_chunk(current_msgs, current_texts))
+        chunks.extend(_split_group(group))
 
     return chunks
+
+
+def _split_group(group: list[TelegramMessage]) -> list[MessageChunk]:
+    """Split a conversation group into chunks, with overlap between them.
+
+    When a chunk boundary is reached, trailing messages from the previous
+    chunk are carried over to the next chunk so that approximately
+    OVERLAP_CHARS worth of context is preserved.  Overlap is applied at
+    message boundaries (never mid-message).
+    """
+    result: list[MessageChunk] = []
+    current_texts: list[str] = []
+    current_msgs: list[TelegramMessage] = []
+    current_len = 0
+
+    for msg in group:
+        formatted = _format_message(msg)
+        msg_len = len(formatted)
+
+        if current_len + msg_len > TARGET_CHARS and current_msgs:
+            result.append(_make_chunk(current_msgs, current_texts))
+
+            # Compute overlap: walk backwards through the current chunk's
+            # messages and accumulate until we reach ~OVERLAP_CHARS.
+            overlap_msgs: list[TelegramMessage] = []
+            overlap_texts: list[str] = []
+            overlap_len = 0
+            for m, t in zip(
+                reversed(current_msgs), reversed(current_texts)
+            ):
+                t_len = len(t)
+                if overlap_len + t_len > OVERLAP_CHARS and overlap_msgs:
+                    break
+                overlap_msgs.insert(0, m)
+                overlap_texts.insert(0, t)
+                overlap_len += t_len
+
+            current_msgs = list(overlap_msgs)
+            current_texts = list(overlap_texts)
+            current_len = overlap_len
+
+        current_texts.append(formatted)
+        current_msgs.append(msg)
+        current_len += msg_len
+
+    if current_msgs:
+        result.append(_make_chunk(current_msgs, current_texts))
+
+    return result
 
 
 def _make_chunk(msgs: list[TelegramMessage], texts: list[str]) -> MessageChunk:

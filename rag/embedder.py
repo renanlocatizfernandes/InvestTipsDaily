@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import numpy as np
 
@@ -34,7 +35,10 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     """
     model = _get_model()
     prefixed = [f"passage: {t}" for t in texts]
+    start = time.monotonic()
     embeddings = model.encode(prefixed, normalize_embeddings=True, show_progress_bar=True)
+    elapsed = time.monotonic() - start
+    logger.info("Embedded %d texts in %.2fs", len(texts), elapsed)
     return embeddings.tolist()
 
 

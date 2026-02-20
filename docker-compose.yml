@@ -9,3 +9,19 @@ services:
       - ./data/chroma_db:/app/data/chroma_db
       - ./data/telegram_export:/app/data/telegram_export
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3

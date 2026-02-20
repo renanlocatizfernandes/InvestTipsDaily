@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from ingestion.chunker import MessageChunk, chunk_messages
+from ingestion.chunker import MessageChunk, chunk_messages, OVERLAP_CHARS, TARGET_CHARS
 from ingestion.parser import TelegramMessage
 
 
@@ -117,3 +117,64 @@ def test_empty_messages_filtered():
     chunks = chunk_messages(msgs)
     assert len(chunks) == 1
     assert chunks[0].message_ids == [2]
+
+
+def test_overlap_between_split_chunks():
+    """When a conversation group is split, trailing messages from the previous
+    chunk are carried over to the next chunk as overlap (~OVERLAP_CHARS worth).
+
+    We craft messages so that:
+    - Each formatted message is ~250 chars (well above OVERLAP_CHARS=200 per
+      single message, so at least 1 message overlaps).
+    - 10 such messages produce ~2500 chars total, which exceeds TARGET_CHARS
+      and forces a split, giving us multiple chunks to verify overlap on.
+    """
+    # Each message text is 200 chars; formatted adds prefix (~50 chars)
+    # so each formatted message is ~250 chars.  TARGET_CHARS=2000 means
+    # roughly 8 messages fit per chunk before a split.
+    msg_text = "A" * 200
+    msgs = [
+        _make_msg(i, author=f"User{i}", minutes_offset=i, text=msg_text)
+        for i in range(1, 11)
+    ]
+
+    chunks = chunk_messages(msgs)
+
+    # Must produce more than 1 chunk (the group is too large for one)
+    assert len(chunks) >= 2, f"Expected >=2 chunks, got {len(chunks)}"
+
+    # Verify overlap: for each consecutive pair of chunks, the tail of the
+    # first chunk's message_ids should overlap with the head of the next.
+    for i in range(len(chunks) - 1):
+        prev_ids = chunks[i].message_ids
+        next_ids = chunks[i + 1].message_ids
+
+        overlap_ids = set(prev_ids) & set(next_ids)
+        assert len(overlap_ids) > 0, (
+            f"Chunks {i} and {i+1} share no message IDs — overlap is missing. "
+            f"prev_ids={prev_ids}, next_ids={next_ids}"
+        )
+
+        # The overlapping IDs should be from the END of the previous chunk
+        # and the START of the next chunk.
+        for oid in overlap_ids:
+            assert oid in prev_ids[-len(overlap_ids) - 1 :]
+            assert oid in next_ids[: len(overlap_ids) + 1]
+
+    # Verify metadata is still correct in each chunk
+    for chunk in chunks:
+        assert chunk.metadata["message_count"] == len(chunk.message_ids)
+        assert chunk.metadata["author_count"] == len(chunk.authors)
+
+
+def test_overlap_does_not_apply_to_small_groups():
+    """Groups that fit in a single chunk should produce exactly one chunk
+    with no duplication — overlap only applies when splitting occurs."""
+    msgs = [
+        _make_msg(1, minutes_offset=0, text="Short msg 1"),
+        _make_msg(2, minutes_offset=1, text="Short msg 2"),
+        _make_msg(3, minutes_offset=2, text="Short msg 3"),
+    ]
+    chunks = chunk_messages(msgs)
+    assert len(chunks) == 1
+    assert chunks[0].message_ids == [1, 2, 3]

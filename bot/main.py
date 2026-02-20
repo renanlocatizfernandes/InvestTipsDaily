@@ -26,6 +26,7 @@ from bot.handlers import (
     cmd_tips,
     handle_mention,
     handle_reply,
+    start_button_callback,
 )
 from bot.health import cmd_health
 from bot.live_ingest import setup_live_ingestion
@@ -85,7 +86,10 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("config", cmd_config))
 
-    # Handle feedback button presses
+    # Handle /start inline keyboard button presses
+    app.add_handler(CallbackQueryHandler(start_button_callback, pattern=r"^help_"))
+
+    # Handle feedback button presses (catch-all for remaining callbacks)
     app.add_handler(CallbackQueryHandler(handle_feedback_callback))
 
     # Handle @mentions in group messages
